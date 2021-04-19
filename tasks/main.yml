@@ -1,2 +1,67 @@
 ---
-# tasks file for paulrentschler.varnish
+# Install and configure Varnish
+
+##
+# Configure the Varnish repo
+##
+- name: add the varnish repository (Debian)
+  ansible.builtin.apt_repository:
+    repo: "deb http://repo.varnish-cache.org/debian {{ ansible_distribution_release }} varnish-{{ varnish_version }}"
+    state: present
+    update_cache: yes
+  become: yes
+  when: ansible_distribution == "Debian"
+
+- name: add the varnish repository (Ubuntu)
+  ansible.builtin.apt_repository:
+    repo: "deb http://repo.varnish-cache.org/ubuntu {{ ansible_distribution_release }} varnish-{{ varnish_version }}"
+    state: present
+    update_cache: yes
+  become: yes
+  when: ansible_distribution == "Ubuntu"
+
+- name: add the varnish repository (RedHat)
+  shell:
+    cmd: "rpm --nosignature -i https://repo.varnish-cache.org/redhat/varnish-{{ varnish_version }}.el6.rpm"
+    creates: "/etc/yum.repos.d/varnish.repo"
+  become: yes
+  when: ansible_os_family == "RedHat"
+
+
+##
+# Install Varnish
+##
+- name: install Varnish
+  ansible.builtin.package:
+    name: varnish
+    state: present
+  become: yes
+
+
+##
+# Configure Varnish
+##
+- name: set the VCL config file
+  ansible.builtin.template:
+    src: "default-{{ varnish_version }}.vcl.j2"
+    dest: /etc/varnish/default.vcl
+    owner: root
+    group: "{{ devops_group|default('adm') }}"
+    mode: 0664
+  notify: restart Varnish
+  become: yes
+  tags:
+    - varnish_config
+
+- name: set the service script config file
+  ansible.builtin.template:
+    src: varnish.conf.j2
+    dest: /etc/default/varnish
+    owner: root
+    group: "{{ devops_group|default('adm') }}"
+    mode: 0664
+  notify: restart Varnish
+  become: yes
+  tags:
+    - varnish_config
+

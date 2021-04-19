@@ -1,2 +1,32 @@
 ---
-# defaults file for paulrentschler.varnish
+# Default values Varnish related variables
+
+
+varnish_version: 4.0
+
+##
+# Enable health checks against zope clients
+#
+# Should be a url (including the Plone site name) to a static page
+# in the site that is quick to load.
+##
+#varnish_health_check_url: /Plone/about
+
+##
+# Custom 503 Service Unavailable message
+#
+# Should be an absolute path on the file system to a HTML page that
+# can be rendered instead of Varnish's default 503 page which is less
+# than informative for the user.
+##
+#varnish_custom_503_filename: /path/to/document/root/with/error.html
+
+##
+# Number of Zope clients available
+#
+# This will dynamically build the backend cluster for Varnish to cache. The
+# Zope clients must start listening on port 8080 and use sequential ports
+# from there.
+##
+varnish_zope_clients: 1
+

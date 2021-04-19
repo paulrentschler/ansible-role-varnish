@@ -18,3 +18,4 @@ galaxy_info:
     - web
     - caching
     - reverse_proxy
+    - Plone

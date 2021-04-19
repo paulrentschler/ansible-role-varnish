@@ -1,0 +1,192 @@
+#
+# {{ ansible_managed }}
+#
+# This is a VCL configuration file for varnish 4.x.  See the vcl(7)
+# man page for details on VCL syntax and semantics.
+#
+# These subs are executed and if they do not return something the parent sub
+# of the same name is called from the builtin VCL file:
+# https://raw.githubusercontent.com/varnish/Varnish-Cache/master/bin/varnishd/builtin.vcl
+#
+
+# Marker to tell the VCL compiler that this VCL has been adapted to the
+# new 4.0 format.
+vcl 4.0;
+
+import std;
+import directors;
+
+# Define our zope clients with health checks
+{% for i in range(varnish_zope_clients) %}
+backend zope{{ i }} {
+    .host = "127.0.0.1";
+    .port = "808{{ i }}";
+{% if varnish_health_check_url is defined %}
+    .probe = {
+        .url = "{{ varnish_health_check_url }}";
+        .interval = 10s;
+        .timeout = 3s;
+        .window = 3;
+        .threshold = 3;
+    }
+{% endif %}
+}
+{% endfor %}
+
+
+# sub vcl_init is used to initialize the vcl configuration.
+sub vcl_init {
+    # Create a round-robin director called "zopecluster" which will talk to
+    # Plone's zope clients as backends.
+    new zopecluster = directors.round_robin();
+{% for i in range(varnish_zope_clients) %}
+    zopecluster.add_backend(zope{{ i }});
+{% endfor %}
+    return(ok);
+}
+
+
+# This sets an access control list for an action we are calling "purge".
+# Only localhost will be able to perform this "purge" action (detailed later).
+acl purge {
+    "localhost";
+    "127.0.0.1";
+}
+
+
+# sub vcl_recv is called whenever a request is received by Varnish (i.e. a
+# request is made for a webpage).
+sub vcl_recv {
+    # Use our round-robin "zopecluster" for the backend.
+    set req.backend_hint = zopecluster.backend();
+
+    # set a header to indicate how much grace was used to deliver the content
+    set req.http.grace = "none";
+
+    # Remove Google Analytics cookies - prevents caching of anonymous content
+    # Side effect: loss the time spend on the site data
+    if (req.http.cookie) {
+        # Remove has_js and Google Analytics __* cookies.
+        set req.http.Cookie = regsuball(req.http.Cookie, "(^|;\s*)(_[_a-z]+|has_js)=[^;]*", "");
+        # Remove a ";" prefix, if present.
+        set req.http.Cookie = regsub(req.http.Cookie, "^;\s*", "");
+    }
+
+    # This uses the ACL action called "purge". Basically if a request to
+    # PURGE the cache comes from anywhere other than localhost, ignore it.
+    if (req.method == "PURGE") {
+        if (!client.ip ~ purge) {
+            return(synth(405, "Not allowed."));
+        }
+        # purge the request
+        return(purge);
+    }
+
+    # Force lookup if the request is a no-cache request from the client.
+    if (req.http.Cache-Control ~ "no-cache") {
+        set req.hash_always_miss = true;
+        return(hash);
+    }
+
+    # Pass any requests with the "If-None-Match" header directly to Plone.
+    if (req.http.If-None-Match) {
+        return(pass);
+    }
+
+    # ignore the accept-encoding from the client
+    unset req.http.Accept-Encoding;
+}
+
+
+# Called if the cache has a copy of the page.
+sub vcl_hit {
+    if (obj.ttl >= 0s) {
+        # normal hit (content in the cache)
+        return(deliver);
+    }
+
+    # Content not found. Look for stale content.
+    if (std.healthy(req.backend_hint)) {
+        # Backend is healthy. Limit to 3 minutes.
+        if (obj.ttl + 3m > 0s) {
+            set req.http.grace = "normal(limited)";
+            return(deliver);
+        } else {
+            # No candidate for grace. Fetch a fresh object.
+            return(fetch);
+        }
+    } else {
+        # Backend is sick. Use full grace.
+        if (obj.ttl + obj.grace > 0s) {
+            set req.http.grace = "full";
+            return(deliver);
+        } else {
+            # No graced object.
+            return(fetch);
+        }
+    }
+    return(fetch);
+}
+
+
+# Called after a document has been successfully retrieved from the backend.
+sub vcl_backend_response {
+    # hold objects in the cache 2 hours past their expiry (TTL)
+    set beresp.ttl = 3m;
+    set beresp.grace = 2h;
+
+    if (beresp.ttl == 0s) {
+        set beresp.http.X-Varnish-Action = "FETCH (hit_for_pass - 0 TTL)";
+        set beresp.ttl = 120s;
+        set beresp.uncacheable = true;
+    }
+    if (beresp.http.Set-Cookie) {
+        set beresp.http.X-Varnish-Action = "FETCH (hit_for_pass - response sets cookie)";
+        set beresp.ttl = 120s;
+        set beresp.uncacheable = true;
+    }
+    if (beresp.http.Cache-Control ~ "(private|no-cache|no-store)") {
+        set beresp.http.X-Varnish-Action = "FETCH (hit_for_pass - response sets private/no-cache/no-store token)";
+        set beresp.ttl = 120s;
+        set beresp.uncacheable = true;
+    }
+    if (beresp.http.Authorization && !beresp.http.Cache-Control ~ "public") {
+        set beresp.http.X-Varnish-Action = "FETCH (hit_for_pass - authorized and no public cache control)";
+        set beresp.ttl = 120s;
+        set beresp.uncacheable = true;
+    }
+    return(deliver);
+}
+
+
+# Called before a cached object is delivered to the client.
+# In this case add an extra header to the HTTP response.
+sub vcl_deliver {
+    # pass along the grace header
+    set resp.http.grace = req.http.grace;
+
+    # set a header to indicate the client cookies presented
+    set resp.http.X-Varnish-Cookie-Debug = req.http.Cookie;
+
+    # indicate if this request was a hit or a miss
+    if (obj.hits > 0) {
+        set resp.http.X-Cache = "HIT";
+    } else {
+        set resp.http.X-Cache = "MISS";
+    }
+}
+
+
+{% if varnish_custom_503_filename is defined %}
+# Used to provide a custom 503 error message that is styled
+# like the rest of the site and more friendly in verbiage.
+sub vcl_backend_error {
+    set beresp.http.Content-Type = "text/html; charset=utf-8";
+
+    if (beresp.status == 503) {
+        set beresp.http.error503 = std.fileread("{{ varnish_custom_503_filename }}");
+        synthetic beresp.http.error503;
+        return(deliver);
+    }
+}
+{% endif %}
