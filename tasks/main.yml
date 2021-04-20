@@ -2,45 +2,107 @@
 # Install and configure Varnish
 
 ##
-# Configure the Varnish repo
+# Compile and install Varnish
 ##
-- name: add the varnish repository (Debian)
-  ansible.builtin.apt_repository:
-    repo: "deb http://repo.varnish-cache.org/debian {{ ansible_distribution_release }} varnish-{{ varnish_version }}"
-    state: present
-    update_cache: yes
-  become: yes
-  when: ansible_distribution == "Debian"
 
-- name: add the varnish repository (Ubuntu)
-  ansible.builtin.apt_repository:
-    repo: "deb http://repo.varnish-cache.org/ubuntu {{ ansible_distribution_release }} varnish-{{ varnish_version }}"
-    state: present
-    update_cache: yes
+- name: "create the src directory"
+  ansible.builtin.file:
+    path: "/usr/local/src"
+    state: directory
+    owner: "{{ devops_user|default(ansible_user) }}"
+    group: "{{ devops_group|default('adm') }}"
+    mode: 0775
   become: yes
-  when: ansible_distribution == "Ubuntu"
 
-- name: add the varnish repository (RedHat)
-  shell:
-    cmd: "rpm --nosignature -i https://repo.varnish-cache.org/redhat/varnish-{{ varnish_version }}.el6.rpm"
-    creates: "/etc/yum.repos.d/varnish.repo"
-  become: yes
-  when: ansible_os_family == "RedHat"
+- name: "check for installation"
+  ansible.builtin.stat:
+    path: "/usr/local/sbin/varnishd"
+  register: _varnish_installed
 
+- name: compile and install Varnish
+  block:
+    - name: "install the dependencies"
+      ansible.builtin.package:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - make
+        - automake
+        - autotools-dev
+        - libedit-dev
+        - libjemalloc-dev
+        - libncurses-dev
+        - libpcre3-dev
+        - libtool
+        - pkg-config
+        - python3-docutils
+        - python3-sphinx
+        - cpio
+      become: yes
 
-##
-# Install Varnish
-##
-- name: install Varnish
-  ansible.builtin.package:
-    name: varnish
-    state: present
-  become: yes
+    - name: "extract the tarball"
+      ansible.builtin.unarchive:
+        src: "files/varnish-{{ varnish_version }}.tar.gz"
+        dest: "/usr/local/src/"
+        creates: "/usr/local/src/varnish-{{ varnish_version }}"
+
+    - name: "generate the configure script"
+      ansible.builtin.shell:
+        cmd: "./autogen.sh"
+        chdir: "/usr/local/src/varnish-{{ varnish_version }}"
+        creates: "/usr/local/src/varnish-{{ varnish_version }}/autom4te.cache"
+
+    - name: "configure the package"
+      ansible.builtin.shell:
+        cmd: "./configure"
+        chdir: "/usr/local/src/varnish-{{ varnish_version }}"
+        creates: "/usr/local/src/varnish-{{ varnish_version }}/Makefile"
+
+    - name: "make the executable"
+      community.general.make:
+        chdir: "/usr/local/src/varnish-{{ varnish_version }}"
+
+    - name: "install the executable"
+      community.general.make:
+        chdir: "/usr/local/src/varnish-{{ varnish_version }}"
+        target: "install"
+      become: yes
+
+    - name: update the dynamic linker run-time bindings
+      ansible.builtin.command: ldconfig
+      become: yes
+
+    - name: create the varnish share directory
+      ansible.builtin.file:
+        path: /usr/share/varnish
+        owner: root
+        group: root
+        mode: 0755
+        state: directory
+      become: yes
+
+    - name: install the reload script
+      ansible.builtin.copy:
+        src: files/reload-vcl
+        dest: /usr/share/varnish/reload-vcl
+        owner: root
+        group: root
+        mode: 0755
+      become: yes
+  when: not _varnish_installed.stat.exists
+
 
 
 ##
 # Configure Varnish
 ##
+- name: link to the config directory
+  ansible.builtin.file:
+    src: /usr/local/etc/varnish
+    dest: /etc/varnish
+    state: link
+  become: yes
+
 - name: set the VCL config file
   ansible.builtin.template:
     src: "default-{{ varnish_version }}.vcl.j2"
@@ -53,6 +115,15 @@
   tags:
     - varnish_config
 
+- name: create the secret file
+  ansible.builtin.template:
+    src: secret.j2
+    dest: /etc/varnish/secret
+    owner: root
+    group: root
+    mode: 0600
+  become: yes
+
 - name: set the service script config file
   ansible.builtin.template:
     src: varnish.conf.j2
@@ -64,4 +135,29 @@
   become: yes
   tags:
     - varnish_config
+
+
+
+##
+# Configure it to autostart
+##
+- name: install the init scripts
+  ansible.builtin.copy:
+    src: "files/{{ item }}"
+    dest: "/etc/init.d/{{ item }}"
+    owner: root
+    group: root
+    mode: 0755
+  loop:
+    - varnish
+    - varnishlog
+    - varnishncsa
+  become: yes
+
+- name: start Varnish
+  ansible.builtin.service:
+    name: varnish
+    state: started
+    enabled: yes
+  become: yes
 
