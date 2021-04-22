@@ -115,6 +115,11 @@
   tags:
     - varnish_config
 
+- name: check for existing secret file
+  ansible.builtin.stat:
+    path: "/etc/varnish/secret"
+  register: _varnish_secret_file
+
 - name: create the secret file
   ansible.builtin.template:
     src: secret.j2
@@ -123,6 +128,7 @@
     group: root
     mode: 0600
   become: yes
+  when: not _varnish_secret_file.stat.exists
 
 - name: set the service script config file
   ansible.builtin.template:
